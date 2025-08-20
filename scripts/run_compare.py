@@ -7,8 +7,8 @@ from comparator.comparator import PatchColorComparatorBase
 
 
 if __name__ == "__main__":
-    ref_img = "/home/fangjingwu/data/dataset/test_dataset/upper/paired_image/100096.jpg"
-    gen_img = "/home/fangjingwu/data/dataset/test_dataset/upper/ours_test_res/100096.jpg"
+    ref_img = "/home/fangjingwu/data/static/vitonmodel/00824_00.jpg"
+    gen_img = "/home/fangjingwu/data/static/ours_test_res/00824_00.jpg"
     out_dir = "./vis_demo"
 
     comp = PatchColorComparatorBase(

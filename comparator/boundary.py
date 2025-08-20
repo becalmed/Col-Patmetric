@@ -19,6 +19,7 @@ def extract_boundary_points_simple(mask1, mask2, num_points=50):
         c = c.reshape(-1, 2)
         d = np.sqrt(((np.roll(c, -1, axis=0) - c) ** 2).sum(1))
         s = np.concatenate([[0], np.cumsum(d)])
+        s = s[:-1]
         s /= (s[-1] if s[-1] > 0 else 1)
         t = np.linspace(0, 1, num_points, endpoint=True)
         fx = interp1d(s, c[:, 0], kind='linear', fill_value='extrapolate')

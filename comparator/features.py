@@ -9,16 +9,34 @@ import numpy as np
 # - post: 额外后处理（边界距离、响应值分位截断），按需要可省略
 STRATEGY_REGISTRY = [
     {
+        "name": "ultra_strict",
+        "rank": 0,
+        "kaze": dict(extended=False, upright=False, threshold=1.5e-3, nOctaves=3, nOctaveLayers=2, diffusivity=2),
+        "post": dict(boundary_dist=16, response_quantile=None)
+    },
+    {
         "name": "strict",
         "rank": 1,
         "kaze": dict(extended=False, upright=False, threshold=1.2e-3, nOctaves=3, nOctaveLayers=2, diffusivity=2),
-        "post": dict(boundary_dist=6, response_quantile=None)
+        "post": dict(boundary_dist=14, response_quantile=None)
     },
     {
         "name": "fast",
         "rank": 2,
         "kaze": dict(extended=False, upright=False, threshold=8e-4, nOctaves=3, nOctaveLayers=3, diffusivity=2),
-        "post": dict(boundary_dist=6, response_quantile=None)
+        "post": dict(boundary_dist=14, response_quantile=None)
+    },
+    {
+        "name": "balanced",
+        "rank": 3,
+        "kaze": dict(extended=False, upright=False, threshold=4e-4, nOctaves=4, nOctaveLayers=4, diffusivity=2),
+        "post": dict(boundary_dist=14, response_quantile=None)  
+    },
+    {
+        "name": "dense",
+        "rank": 4,
+        "kaze": dict(extended=False, upright=False, threshold=1e-4, nOctaves=5, nOctaveLayers=5, diffusivity=2),
+        "post": dict(boundary_dist=14, response_quantile=None)
     },
 ]
 

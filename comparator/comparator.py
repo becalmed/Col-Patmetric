@@ -3,10 +3,10 @@ import cv2
 import numpy as np
 from PIL import Image
 
-from .segmentation import auto_crop_interest_area_separate, resize_to_larger
+from .segmentation import auto_crop_interest_area_separate, resize_to_larger, crop_interest_area_separate
 from .features import detect_kaze
 from .matching import flann_match_and_filter
-from .warp import build_tps_with_constraints, map_points
+from .warp import build_tps_with_constraints, map_points, make_all_constraints, uniformized_warp_points, augment_with_ghost_anchors, uniformized_warp_points_v2
 from .visualization import create_patch_comparison_visualization
 
 class PatchColorComparatorBase:
@@ -37,7 +37,6 @@ class PatchColorComparatorBase:
         return np.array([(x, y) for y in range(0, h, step)
                          for x in range(0, w, step) if mask_gray[y, x] > 0])
 
-    # 为兼容旧用法暴露 detect_kaze（内部走 features.detect_kaze）
     def detect_kaze(self, gray, mask=None, save_path=None, strategy_name=None):
         return detect_kaze(gray, mask=mask, save_path=save_path, strategy_name=strategy_name, filter_boundary=True)
 
@@ -59,7 +58,7 @@ class PatchColorComparatorBase:
         (bbox_ref, bbox_gen), ref_color_crop, gen_color_crop, ref_mask_crop, gen_mask_crop = \
             auto_crop_interest_area_separate(ref_color, gen_color, self.server_addr, self.region)
         (_, _), ref_gray_crop, gen_gray_crop, ref_mask_gray_crop, gen_mask_gray_crop = \
-            auto_crop_interest_area_separate(ref_gray_full, gen_gray_full, self.server_addr, self.region)
+            crop_interest_area_separate(ref_gray_full, gen_gray_full, self.server_addr, self.region, ref_color, gen_color)
 
         # 转灰度
         if ref_gray_crop.ndim == 3: ref_gray_crop = cv2.cvtColor(ref_gray_crop, cv2.COLOR_BGR2GRAY)
@@ -80,13 +79,12 @@ class PatchColorComparatorBase:
         kp1, des1, ref_info = detect_kaze(
             ref_gray_crop, mask=ref_mask_gray_crop,
             save_path=os.path.join(output_dir, 'reference_keypoints.png'),
-            strategy_name="dense",  # 自适应选择
-            target_range=(300, 500),
+            target_range=(300, 800),
             max_steps=8,
             save_each_step_dir=os.path.join(output_dir, "ref_kaze_steps")
         )
         if "fallback" in ref_info and ref_info["fallback"]==["fallback_return_as_is"]:
-            print(f"点数未到达下限，直接输出,策略: {ref_info['config_name']}")
+            print(f"点数未到达下限，直接输出,策略: {ref_info['config_name']}, 特征点: {ref_info['keypoint_count']}")
             result.update({
             'total_keypoints': len(des1) if des1 is not None else 0,
             'good_matches': 0,
@@ -101,7 +99,7 @@ class PatchColorComparatorBase:
         print(f"✅ 参考图像策略: {ref_info['config_name']} | 特征点: {ref_info['keypoint_count']}")
         kp2, des2, gen_info = detect_kaze(
             gen_gray_crop, mask=gen_mask_gray_crop,
-            target_range=(300, 500),
+            target_range=(300, 900),
             save_path=os.path.join(output_dir, 'generated_keypoints.png'),
             strategy_name=ref_info['config_name']  # 保持策略一致
         )
@@ -122,6 +120,7 @@ class PatchColorComparatorBase:
         filtered_src_pts = np.array([kp1[m.queryIdx].pt for m in filtered], dtype=np.float32) if filtered else np.empty((0, 2))
         filtered_dst_pts = np.array([kp2[m.trainIdx].pt for m in filtered], dtype=np.float32) if filtered else np.empty((0, 2))
 
+        use_uniformized=True
         # ---- TPS/RBF （含边界约束）----
         try:
             rbf_x, rbf_y, b1, b2 = build_tps_with_constraints(
@@ -130,6 +129,13 @@ class PatchColorComparatorBase:
                 corner_config=self.corner_config, method='corner_based', n_boundary=30, smooth=0.1
             )
             use_tps = True
+            all_src, all_dst = make_all_constraints(
+                filtered_src_pts, filtered_dst_pts,
+                ref_mask_gray_crop, gen_mask_gray_crop,
+                corner_config='adaptive', method='corner_based', n_boundary=30
+            )
+            use_uniformized = True
+            all_src, all_dst = augment_with_ghost_anchors(all_src, all_dst, ref_mask_gray_crop, num=200, mindist=20)
         except Exception as e:
             print(f"TPS 构建失败，改用直接对应: {e}")
             rbf_x = rbf_y = None
@@ -137,6 +143,29 @@ class PatchColorComparatorBase:
 
         # ---- 采样 + 色差 ----
         points = self.mask_grid_sample(ref_gray_crop, step=self.patch_size)
+        # warped_pts, alpha = uniformized_warp_points(
+        #     query_points=points,              
+        #     rbf_x=rbf_x, rbf_y=rbf_y,
+        #     all_src=all_src, all_dst=all_dst,
+        #     k_local=12,                      
+        #     sigma_local=None,                
+        #     alpha_k=32, alpha_sigma=None,     
+        #     feather=False                   #拉普拉斯羽化
+        # )
+
+        warped_pts, alpha = uniformized_warp_points_v2(
+            query_points=points,         # 循环里的 points
+            rbf_x=rbf_x, rbf_y=rbf_y,
+            all_src=all_src, all_dst=all_dst,
+            k_local=12,                  # 8~16
+            sigma_local=None,            # 自动
+            alpha_k=32, alpha_sigma=None,
+            alpha_smooth_knn=16, alpha_smooth_step=0.5,
+            do_thin=True,  thin_radius=6.0,      # 视像素尺度调（一般=~网格边长）
+            irls_iters=3, robust='huber', robust_c=None,
+            do_clamp=True, clamp_knn=16, clamp_sigma=3.0
+        )
+
         h_ref, w_ref = ref_color_crop.shape[:2]
         h_gen, w_gen = gen_color_crop.shape[:2]
 
@@ -145,7 +174,9 @@ class PatchColorComparatorBase:
         patch_pairs = []
 
         for i, (x1, y1) in enumerate(points):
-            if use_tps:
+            if use_uniformized:
+                x2f, y2f = warped_pts[i, 0], warped_pts[i, 1]
+            elif use_tps:
                 x2f, y2f = rbf_x(x1, y1), rbf_y(x1, y1)
             else:
                 x2f, y2f = x1, y1

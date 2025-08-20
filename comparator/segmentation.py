@@ -4,6 +4,7 @@ from PIL import Image
 from .vton_human_parsing import run_human_tasks_grpc, pil_b64
 
 UPPER_LABELS = (23, 20, 14)  # top / outerwear / one-piece
+LOWER_LABELS = (13, 12)      # pants / skirt
 
 def _labels_to_mask(parse_arr, labels):
     m = np.zeros_like(parse_arr, dtype=np.uint8)
@@ -30,7 +31,7 @@ def get_interest_area(img_bgr, server_addr: str, region: str = 'upper'):
     if region == 'upper':
         mask = _labels_to_mask(parse_arr, UPPER_LABELS)
     elif region == 'lower':
-        mask = _labels_to_mask(parse_arr, (13, 14))
+        mask = _labels_to_mask(parse_arr, LOWER_LABELS) 
     elif region == 'all':
         mask = ((parse_arr > 0).astype(np.uint8) * 255)
     elif region == 'dress':
@@ -58,6 +59,26 @@ def auto_crop_interest_area_separate(img1_bgr, img2_bgr, server_addr: str, regio
     mask2 = (np.array(mask2_pil) > 0).astype(np.uint8)
     img1 = img1_bgr * mask1[..., None] if img1_bgr.ndim == 3 else img1_bgr * mask1
     img2 = img2_bgr * mask2[..., None] if img2_bgr.ndim == 3 else img2_bgr * mask2
+
+    img1_crop = crop_by_bbox(img1, bbox1)
+    img2_crop = crop_by_bbox(img2, bbox2)
+    mask1_crop = crop_by_bbox((mask1 * 255).astype(np.uint8), bbox1)
+    mask2_crop = crop_by_bbox((mask2 * 255).astype(np.uint8), bbox2)
+    return (bbox1, bbox2), img1_crop, img2_crop, mask1_crop, mask2_crop
+
+def crop_interest_area_separate(img1_gry, img2_gry, server_addr: str, region: str = 'upper', img1_bgr=None, img2_bgr=None):
+    """依照bbox裁剪；返回：(bbox1,bbox2), img1_crop, img2_crop, mask1_crop, mask2_crop"""
+
+    bbox1, mask1_pil = get_interest_area(img1_bgr, server_addr, region)
+    bbox2, mask2_pil = get_interest_area(img2_bgr, server_addr, region)
+    
+    if not bbox1 or not bbox2:
+        raise ValueError("无法获取感兴趣区域的边界框，请检查输入图像。")
+
+    mask1 = (np.array(mask1_pil) > 0).astype(np.uint8)
+    mask2 = (np.array(mask2_pil) > 0).astype(np.uint8)
+    img1 = img1_gry * mask1[..., None] if img1_gry.ndim == 3 else img1_gry * mask1
+    img2 = img2_gry * mask2[..., None] if img2_gry.ndim == 3 else img2_gry * mask2
 
     img1_crop = crop_by_bbox(img1, bbox1)
     img2_crop = crop_by_bbox(img2, bbox2)
