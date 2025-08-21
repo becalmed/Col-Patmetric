@@ -6,7 +6,7 @@ from PIL import Image
 from .segmentation import auto_crop_interest_area_separate, resize_to_larger, crop_interest_area_separate
 from .features import detect_kaze
 from .matching import flann_match_and_filter
-from .warp import build_tps_with_constraints, map_points, make_all_constraints, uniformized_warp_points, augment_with_ghost_anchors, uniformized_warp_points_v2
+from .cie import robust_cloth_color_diff
 from .visualization import create_patch_comparison_visualization
 
 class PatchColorComparatorBase:
@@ -16,7 +16,7 @@ class PatchColorComparatorBase:
         self.half = patch_size // 2
         self.server_addr = server_addr
         self.corner_config = corner_config
-        self.region = region  # 默认 upper
+        self.region = region 
 
     # ==== 小工具 ====
     def _clear_output_dir(self, output_dir):
@@ -67,7 +67,6 @@ class PatchColorComparatorBase:
         # 统一大小
         ref_color_crop, gen_color_crop, ref_gray_crop, gen_gray_crop, ref_mask_gray_crop, gen_mask_gray_crop = \
             resize_to_larger(ref_color_crop, gen_color_crop, ref_gray_crop, gen_gray_crop, ref_mask_gray_crop, gen_mask_gray_crop)
-
         # 保存裁剪图
         Image.fromarray(cv2.cvtColor(ref_color_crop, cv2.COLOR_BGR2RGB)).save(os.path.join(output_dir, 'reference_cropped.png'))
         Image.fromarray(cv2.cvtColor(gen_color_crop, cv2.COLOR_BGR2RGB)).save(os.path.join(output_dir, 'generated_cropped.png'))
@@ -85,17 +84,6 @@ class PatchColorComparatorBase:
         )
         if "fallback" in ref_info and ref_info["fallback"]==["fallback_return_as_is"]:
             print(f"点数未到达下限，直接输出,策略: {ref_info['config_name']}, 特征点: {ref_info['keypoint_count']}")
-            result.update({
-            'total_keypoints': len(des1) if des1 is not None else 0,
-            'good_matches': 0,
-            'filtered_matches': 0,
-            'match_ratio': 0,
-            'mean_diff_r': 0,
-            'mean_diff_g': 0,
-            'mean_diff_b': 0,
-            'mean_euclid_diff': 0
-        })
-            return result
         print(f"✅ 参考图像策略: {ref_info['config_name']} | 特征点: {ref_info['keypoint_count']}")
         kp2, des2, gen_info = detect_kaze(
             gen_gray_crop, mask=gen_mask_gray_crop,
@@ -116,114 +104,7 @@ class PatchColorComparatorBase:
             ratio_thresh=0.75, angle_deg=5.0, scale_tol=0.15
         )
 
-        # 取过滤后的匹配坐标
-        filtered_src_pts = np.array([kp1[m.queryIdx].pt for m in filtered], dtype=np.float32) if filtered else np.empty((0, 2))
-        filtered_dst_pts = np.array([kp2[m.trainIdx].pt for m in filtered], dtype=np.float32) if filtered else np.empty((0, 2))
-
-        use_uniformized=True
-        # ---- TPS/RBF （含边界约束）----
-        try:
-            rbf_x, rbf_y, b1, b2 = build_tps_with_constraints(
-                filtered_src_pts, filtered_dst_pts,
-                ref_mask_gray_crop, gen_mask_gray_crop,
-                corner_config=self.corner_config, method='corner_based', n_boundary=30, smooth=0.1
-            )
-            use_tps = True
-            all_src, all_dst = make_all_constraints(
-                filtered_src_pts, filtered_dst_pts,
-                ref_mask_gray_crop, gen_mask_gray_crop,
-                corner_config='adaptive', method='corner_based', n_boundary=30
-            )
-            use_uniformized = True
-            all_src, all_dst = augment_with_ghost_anchors(all_src, all_dst, ref_mask_gray_crop, num=200, mindist=20)
-        except Exception as e:
-            print(f"TPS 构建失败，改用直接对应: {e}")
-            rbf_x = rbf_y = None
-            use_tps = False
-
-        # ---- 采样 + 色差 ----
-        points = self.mask_grid_sample(ref_gray_crop, step=self.patch_size)
-        # warped_pts, alpha = uniformized_warp_points(
-        #     query_points=points,              
-        #     rbf_x=rbf_x, rbf_y=rbf_y,
-        #     all_src=all_src, all_dst=all_dst,
-        #     k_local=12,                      
-        #     sigma_local=None,                
-        #     alpha_k=32, alpha_sigma=None,     
-        #     feather=False                   #拉普拉斯羽化
-        # )
-
-        warped_pts, alpha = uniformized_warp_points_v2(
-            query_points=points,         # 循环里的 points
-            rbf_x=rbf_x, rbf_y=rbf_y,
-            all_src=all_src, all_dst=all_dst,
-            k_local=12,                  # 8~16
-            sigma_local=None,            # 自动
-            alpha_k=32, alpha_sigma=None,
-            alpha_smooth_knn=16, alpha_smooth_step=0.5,
-            do_thin=True,  thin_radius=6.0,      # 视像素尺度调（一般=~网格边长）
-            irls_iters=3, robust='huber', robust_c=None,
-            do_clamp=True, clamp_knn=16, clamp_sigma=3.0
-        )
-
-        h_ref, w_ref = ref_color_crop.shape[:2]
-        h_gen, w_gen = gen_color_crop.shape[:2]
-
-        diffs_r, diffs_g, diffs_b, diffs_euclid = [], [], [], []
-        ref_vis, gen_vis = ref_color_crop.copy(), gen_color_crop.copy()
-        patch_pairs = []
-
-        for i, (x1, y1) in enumerate(points):
-            if use_uniformized:
-                x2f, y2f = warped_pts[i, 0], warped_pts[i, 1]
-            elif use_tps:
-                x2f, y2f = rbf_x(x1, y1), rbf_y(x1, y1)
-            else:
-                x2f, y2f = x1, y1
-
-            x1, y1 = int(round(x1)), int(round(y1))
-            x2, y2 = int(round(float(x2f))), int(round(float(y2f)))
-
-            x1a, x1b = max(0, x1 - self.half), min(w_ref, x1 + self.half)
-            y1a, y1b = max(0, y1 - self.half), min(h_ref, y1 + self.half)
-            x2a, x2b = max(0, x2 - self.half), min(w_gen, x2 + self.half)
-            y2a, y2b = max(0, y2 - self.half), min(h_gen, y2 + self.half)
-
-            cv2.rectangle(ref_vis, (x1a, y1a), (x1b, y1b), (0, 0, 255), 2)
-            cv2.rectangle(gen_vis, (x2a, y2a), (x2b, y2b), (255, 0, 0), 2)
-
-            patch_ref = ref_color_crop[y1a:y1b, x1a:x1b].astype(np.float32)
-            patch_gen = gen_color_crop[y2a:y2b, x2a:x2b].astype(np.float32)
-            h, w = min(patch_ref.shape[0], patch_gen.shape[0]), min(patch_ref.shape[1], patch_gen.shape[1])
-            if h == 0 or w == 0: continue
-            patch_ref = patch_ref[:h, :w]; patch_gen = patch_gen[:h, :w]
-            N = h * w
-
-            # 通道差：先求和后做差，最后除以像素数
-            diff_r = abs(patch_ref[:, :, 2].sum() - patch_gen[:, :, 2].sum()) / N
-            diff_g = abs(patch_ref[:, :, 1].sum() - patch_gen[:, :, 1].sum()) / N
-            diff_b = abs(patch_ref[:, :, 0].sum() - patch_gen[:, :, 0].sum()) / N
-            ref_eu = np.sqrt((patch_ref ** 2).sum(axis=2))
-            gen_eu = np.sqrt((patch_gen ** 2).sum(axis=2))
-            diff_euclid = abs(ref_eu.sum() - gen_eu.sum()) / N
-
-            diffs_r.append(diff_r); diffs_g.append(diff_g); diffs_b.append(diff_b); diffs_euclid.append(diff_euclid)
-            patch_pairs.append({
-                'index': i,
-                'ref_center': (x1, y1),
-                'gen_center': (x2, y2),
-                'ref_bbox': (x1a, y1a, x1b, y1b),
-                'gen_bbox': (x2a, y2a, x2b, y2b),
-                'ref_patch': patch_ref.copy(),
-                'gen_patch': patch_gen.copy(),
-                'diff_r': diff_r, 'diff_g': diff_g, 'diff_b': diff_b, 'diff_euclid': diff_euclid
-            })
-
-        # 可视化
-        cv2.imwrite(os.path.join(output_dir, 'ref_patch_vis.png'), ref_vis)
-        cv2.imwrite(os.path.join(output_dir, 'gen_patch_vis.png'), gen_vis)
-        cv2.imwrite(os.path.join(output_dir, 'joint_patch_lines.png'), np.concatenate([ref_vis, gen_vis], axis=1))
-        create_patch_comparison_visualization(patch_pairs, output_dir)
+        score = robust_cloth_color_diff(ref_color_crop, gen_color_crop,ref_mask_gray_crop,gen_mask_gray_crop, return_palette=True, palette_vis_path=os.path.join(output_dir, 'palette_vis.png'))
 
         # 汇总
         result.update({
@@ -231,10 +112,7 @@ class PatchColorComparatorBase:
             'good_matches': len(good),
             'filtered_matches': len(filtered),
             'match_ratio': match_ratio,
-            'mean_diff_r': np.mean(diffs_r) if diffs_r else None,
-            'mean_diff_g': np.mean(diffs_g) if diffs_g else None,
-            'mean_diff_b': np.mean(diffs_b) if diffs_b else None,
-            'mean_euclid_diff': np.mean(diffs_euclid) if diffs_euclid else None
+            'score' : score
         })
 
         print("\n====== 完整对比结果 ======")
@@ -242,10 +120,11 @@ class PatchColorComparatorBase:
         print(f"原始good matches: {result['good_matches']}")
         print(f"过滤后matches: {result['filtered_matches']}")
         print(f"匹配比例: {result['match_ratio']:.2%}")
-        print("各通道平均色差 (越低越相似):")
-        print(f"  R 平均差: {result['mean_diff_r']:.2f}")
-        print(f"  G 平均差: {result['mean_diff_g']:.2f}")
-        print(f"  B 平均差: {result['mean_diff_b']:.2f}")
-        print(f"  Euclidean 色差: {result['mean_euclid_diff']:.2f}")
+        print("分数详情：")
+        hist = result['score']['hist_wasserstein']
+        print(f"  Wasserstein(L,a,b,mean): "
+            f"{hist['L']:.2f}, {hist['a']:.2f}, {hist['b']:.2f}, mean={hist['mean']:.2f}")
+        print(f"  Palette ΔE2000: {result['score']['palette_deltaE']:.2f}")
+        print(f"  Mean Color ΔE2000: {result['score']['mean_color_deltaE']:.2f}")
 
         return result

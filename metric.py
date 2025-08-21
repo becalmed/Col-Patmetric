@@ -54,5 +54,5 @@ def batch_compare_folders(ref_dir, gen_dir, out_dir, patch_size=16, region="uppe
 if __name__ == "__main__":
     ref_folder = "/home/fangjingwu/data/dataset/test_dataset/upper/paired_image"
     gen_folder = "/home/fangjingwu/data/dataset/test_dataset/upper/ours_test_res"
-    out_folder = "/home/fangjingwu/data/dataset/test_dataset/upper/our_metric_res_color"
+    out_folder = "/home/fangjingwu/data/dataset/test_dataset/upper/our_metric_res_cie"
     batch_compare_folders(ref_folder, gen_folder, out_folder, patch_size=32,region="upper")
