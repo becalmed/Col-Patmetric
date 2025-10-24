@@ -8,7 +8,7 @@ from .features import detect_kaze
 from .matching import flann_match_and_filter
 from .cie import robust_cloth_color_diff
 from .visualization import create_patch_comparison_visualization
-
+from .warp import build_tps_with_constraints, map_points, make_all_constraints, uniformized_warp_points, augment_with_ghost_anchors, uniformized_warp_points_v2
 class PatchColorComparatorBase:
     def __init__(self, patch_size=32, server_addr='172.16.2.47:8080',
                  corner_config='adaptive', region='upper'):
@@ -106,6 +106,9 @@ class PatchColorComparatorBase:
 
         score = robust_cloth_color_diff(ref_color_crop, gen_color_crop,ref_mask_gray_crop,gen_mask_gray_crop, return_palette=True, palette_vis_path=os.path.join(output_dir, 'palette_vis.png'))
 
+
+
+        
         # 汇总
         result.update({
             'total_keypoints': len(des1) if des1 is not None else 0,
@@ -126,5 +129,16 @@ class PatchColorComparatorBase:
             f"{hist['L']:.2f}, {hist['a']:.2f}, {hist['b']:.2f}, mean={hist['mean']:.2f}")
         print(f"  Palette ΔE2000: {result['score']['palette_deltaE']:.2f}")
         print(f"  Mean Color ΔE2000: {result['score']['mean_color_deltaE']:.2f}")
+        spatten=match_ratio
+        spal=1-min(1,score['palette_deltaE']/20)
+        smean=1-min(1,score['mean_color_deltaE']/20)
+        b1=0.7  
+        b2=0.3
+        scol=b1 * spal + b2 * smean
+        sfinal=(spatten+scol)/2
+        print(f"Spattern: {spatten:.4f}")
+        print(f"Scolor: {scol:.4f}")
+        print(f"Sfinal = {sfinal:.4f}")
+        
 
         return result

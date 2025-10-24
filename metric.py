@@ -3,6 +3,7 @@ import cv2
 import sys
 from tqdm import tqdm
 import json
+import statistics
 
 from comparator.comparator import PatchColorComparatorBase
 
@@ -16,7 +17,11 @@ def batch_compare_folders(ref_dir, gen_dir, out_dir, patch_size=16, region="uppe
     # 获取所有ref_dir中的图片文件名
     ref_files = [f for f in os.listdir(ref_dir) if f.lower().endswith(('.jpg', '.png', '.jpeg', '.bmp'))]
     results_all = {}
-
+    match_ratios = []
+    s_values = []
+    Emax=20
+    b1=0.7
+    b2=0.3
     for fname in tqdm(ref_files, desc="批量比对中"):
         ref_path = os.path.join(ref_dir, fname)
         gen_path = os.path.join(gen_dir, fname)
@@ -41,18 +46,28 @@ def batch_compare_folders(ref_dir, gen_dir, out_dir, patch_size=16, region="uppe
             print(f"{fname} 处理失败: {e}")
             continue
 
-        # 保存结果为json
+        # 保存结果
         txt_path = os.path.join(cur_out_dir, 'result.txt')
         with open(txt_path, 'w', encoding='utf-8') as f:
             for k, v in result.items():
                 f.write(f"{k}: {v}\n")
-
-    # 可选：保存所有结果汇总
+        match_ratios.append(round(result['match_ratio'], 4))
+        spal=1-min(1,result['score']['palette_deltaE']/Emax)
+        smean=1-min(1,result['score']['mean_color_deltaE']/Emax)
+        s_values.append(round(b1 * spal + b2 * smean, 4))
+    P = round(statistics.mean(match_ratios), 4)
+    Q = round(statistics.mean(s_values), 4)
+    total = round((P + Q) / 2, 4)
+    print(f"Spattern: {P}")
+    print(f"Scolor: {Q}")
+    print(f"Sfinal = {total}")
+    # 保存所有结果汇总
     with open(os.path.join(out_dir, 'summary_results.json'), 'w', encoding='utf-8') as f:
         json.dump(results_all, f, indent=2, ensure_ascii=False)
+        f.write(f"\nSpattern: {P}\nScolor: {Q}\nSfinal: {total}\n")
 
 if __name__ == "__main__":
     ref_folder = "/home/fangjingwu/data/dataset/test_dataset/upper/paired_image"
     gen_folder = "/home/fangjingwu/data/dataset/test_dataset/upper/ours_test_res"
-    out_folder = "/home/fangjingwu/data/dataset/test_dataset/upper/our_metric_res_cie"
-    batch_compare_folders(ref_folder, gen_folder, out_folder, patch_size=32,region="upper")
+    out_folder = "/home/fangjingwu/data/dataset/test_dataset/upper/ours_metric_res_inter"
+    batch_compare_folders(ref_folder, gen_folder, out_folder, patch_size=32, region="upper")

@@ -11,19 +11,19 @@ STRATEGY_REGISTRY = [
     {
         "name": "ultra_strict",
         "rank": 0,
-        "kaze": dict(extended=False, upright=False, threshold=1.5e-3, nOctaves=3, nOctaveLayers=2, diffusivity=2),
+        "kaze": dict(extended=False, upright=False, threshold=1.5e-3, nOctaves=4, nOctaveLayers=2, diffusivity=2),
         "post": dict(boundary_dist=16, response_quantile=None)
     },
     {
         "name": "strict",
         "rank": 1,
-        "kaze": dict(extended=False, upright=False, threshold=1.2e-3, nOctaves=3, nOctaveLayers=2, diffusivity=2),
+        "kaze": dict(extended=False, upright=False, threshold=1.2e-3, nOctaves=4, nOctaveLayers=2, diffusivity=2),
         "post": dict(boundary_dist=14, response_quantile=None)
     },
     {
         "name": "fast",
         "rank": 2,
-        "kaze": dict(extended=False, upright=False, threshold=8e-4, nOctaves=3, nOctaveLayers=3, diffusivity=2),
+        "kaze": dict(extended=False, upright=False, threshold=8e-4, nOctaves=4, nOctaveLayers=3, diffusivity=2),
         "post": dict(boundary_dist=14, response_quantile=None)
     },
     {
@@ -118,14 +118,13 @@ def _run_kaze_once(gray, mask, *, strategy, save_path=None):
     }
     return kp, des, info, k, mask_bin
 
-# —— 主接口：增强版，带兜底保证区间
 def detect_kaze(
     gray, mask=None, save_path=None,
     strategy_name: str | None = None,
     target_range=(300, 1500),
     max_steps=6,
     save_each_step_dir: str | None = None,
-    enforce_range: bool = True,      # 新：强制兜底到区间
+    enforce_range: bool = True, 
 ):
     """
     返回: (kp, des, info)

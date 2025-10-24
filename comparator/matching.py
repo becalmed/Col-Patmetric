@@ -4,15 +4,18 @@ import numpy as np
 from cv2 import FlannBasedMatcher
 
 def flann_match_and_filter(kp1, des1, kp2, des2, ref_gray, gen_gray, output_dir,
-                           ratio_thresh=0.75, angle_deg=5.0, scale_tol=0.15):
+                           ratio_thresh=0.25, angle_deg=5.0, scale_tol=0.15):
     """FLANN KNN + 比值检验 + 方向/尺度过滤；保存两张可视化图片。"""
     flann = FlannBasedMatcher(dict(algorithm=1, trees=8), dict(checks=100))
     matches = flann.knnMatch(des1, des2, k=2)
     good = [m for (m, n) in matches if m.distance < ratio_thresh * n.distance]
-
+    match = [m for (m,n) in matches]
     if len(good) < 4:
         raise ValueError("匹配对过少，无法进行方向/尺度过滤")
-
+    cv2.imwrite(os.path.join(output_dir, 'init_r-good-matches.png'),
+                cv2.drawMatches(ref_gray, kp1, gen_gray, kp2, match, None,
+                                flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS))
+    
     cv2.imwrite(os.path.join(output_dir, 'good_r-good-matches.png'),
                 cv2.drawMatches(ref_gray, kp1, gen_gray, kp2, good, None,
                                 flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS))
