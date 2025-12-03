@@ -218,11 +218,11 @@ def robust_cloth_color_diff(img_ref_bgr, img_gen_bgr, mask_ref, mask_gen,
     if return_palette:
         vis_path = None
         if palette_vis_path is not None:
-            # 只有当 matplotlib 存在并且我们确实有聚类结果时才出图
+            # 只有当 matplotlib 存在并且确实有聚类结果时才出图
             if plt is not None and len(palette_details["c1"]) and len(palette_details["c2"]):
                 vis_path = _visualize_palette_matching(palette_details, save_path=palette_vis_path)
-        out["palette_details"] = palette_details
-        out["palette_vis_path"] = vis_path
+        # out["palette_details"] = palette_details
+        # out["palette_vis_path"] = vis_path
     return out
 
 if __name__ == "__main__":

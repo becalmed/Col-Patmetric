@@ -1,4 +1,5 @@
 import cv2
+import os
 import numpy as np
 from PIL import Image
 from .vton_human_parsing import run_human_tasks_grpc, pil_b64
@@ -12,11 +13,11 @@ def _labels_to_mask(parse_arr, labels):
         m |= (parse_arr == lb).astype(np.uint8)
     return (m * 255).astype(np.uint8)
 
-def get_interest_area(img_bgr, server_addr: str, region: str = 'upper'):
+def get_interest_area(img_bgr, server_addr: str, region: str = 'upper', img_dir: str = None):
     """返回 (bbox, PIL灰度mask)。默认 upper=23,20,14。"""
     img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
     pil_img = Image.fromarray(img_rgb)
-    mask_img, parse_img = run_human_tasks_grpc(server_addr, pil_b64(pil_img), 'all')
+    mask_img, parse_img = run_human_tasks_grpc(server_addr, pil_b64(pil_img), 'all', cache_dir=os.path.dirname(img_dir)+ "_segcache", filename=os.path.basename(img_dir))
     if mask_img is None or parse_img is None:
         raise ValueError("无法获取人体分割结果，请检查输入图像或服务器连接。")
 
@@ -27,7 +28,6 @@ def get_interest_area(img_bgr, server_addr: str, region: str = 'upper'):
     parse_arr = cv2.dilate(parse_arr, kernel, 2)
     parse_arr = cv2.erode(parse_arr, kernel, 2)
     parse_arr = cv2.dilate(parse_arr, kernel, 2)
-
     if region == 'upper':
         mask = _labels_to_mask(parse_arr, UPPER_LABELS)
     elif region == 'lower':
@@ -48,10 +48,10 @@ def crop_by_bbox(img_bgr, bbox):
     crop = pil.crop(bbox)
     return cv2.cvtColor(np.array(crop), cv2.COLOR_RGB2BGR)
 
-def auto_crop_interest_area_separate(img1_bgr, img2_bgr, server_addr: str, region: str = 'upper'):
+def auto_crop_interest_area_separate(img1_bgr, img2_bgr, server_addr: str, region: str = 'upper',img_dir1: str = None,img_dir2: str = None):
     """各自独立裁剪到自身bbox；返回：(bbox1,bbox2), img1_crop, img2_crop, mask1_crop, mask2_crop"""
-    bbox1, mask1_pil = get_interest_area(img1_bgr, server_addr, region)
-    bbox2, mask2_pil = get_interest_area(img2_bgr, server_addr, region)
+    bbox1, mask1_pil = get_interest_area(img1_bgr, server_addr, region, img_dir=img_dir1)
+    bbox2, mask2_pil = get_interest_area(img2_bgr, server_addr, region, img_dir=img_dir2)
     if not bbox1 or not bbox2:
         raise ValueError("无法获取感兴趣区域的边界框，请检查输入图像。")
 
@@ -66,11 +66,11 @@ def auto_crop_interest_area_separate(img1_bgr, img2_bgr, server_addr: str, regio
     mask2_crop = crop_by_bbox((mask2 * 255).astype(np.uint8), bbox2)
     return (bbox1, bbox2), img1_crop, img2_crop, mask1_crop, mask2_crop
 
-def crop_interest_area_separate(img1_gry, img2_gry, server_addr: str, region: str = 'upper', img1_bgr=None, img2_bgr=None):
+def crop_interest_area_separate(img1_gry, img2_gry, server_addr: str, region: str = 'upper', img1_bgr=None, img2_bgr=None, img_dir1: str = None,img_dir2: str = None):
     """依照bbox裁剪；返回：(bbox1,bbox2), img1_crop, img2_crop, mask1_crop, mask2_crop"""
 
-    bbox1, mask1_pil = get_interest_area(img1_bgr, server_addr, region)
-    bbox2, mask2_pil = get_interest_area(img2_bgr, server_addr, region)
+    bbox1, mask1_pil = get_interest_area(img1_bgr, server_addr, region, img_dir=img_dir1)
+    bbox2, mask2_pil = get_interest_area(img2_bgr, server_addr, region, img_dir=img_dir2)
     
     if not bbox1 or not bbox2:
         raise ValueError("无法获取感兴趣区域的边界框，请检查输入图像。")

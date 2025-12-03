@@ -9,6 +9,7 @@ from .matching import flann_match_and_filter
 from .cie import robust_cloth_color_diff
 from .visualization import create_patch_comparison_visualization
 from .warp import build_tps_with_constraints, map_points, make_all_constraints, uniformized_warp_points, augment_with_ghost_anchors, uniformized_warp_points_v2
+from .patchssim import compute_patch_ssim_from_matches
 class PatchColorComparatorBase:
     def __init__(self, patch_size=32, server_addr='172.16.2.47:8080',
                  corner_config='adaptive', region='upper'):
@@ -56,9 +57,9 @@ class PatchColorComparatorBase:
 
         # 分别裁剪 ROI（默认 upper）
         (bbox_ref, bbox_gen), ref_color_crop, gen_color_crop, ref_mask_crop, gen_mask_crop = \
-            auto_crop_interest_area_separate(ref_color, gen_color, self.server_addr, self.region)
+            auto_crop_interest_area_separate(ref_color, gen_color, self.server_addr, self.region, img_dir1=ref_path, img_dir2=gen_path)
         (_, _), ref_gray_crop, gen_gray_crop, ref_mask_gray_crop, gen_mask_gray_crop = \
-            crop_interest_area_separate(ref_gray_full, gen_gray_full, self.server_addr, self.region, ref_color, gen_color)
+            crop_interest_area_separate(ref_gray_full, gen_gray_full, self.server_addr, self.region, ref_color, gen_color, img_dir1=ref_path, img_dir2=gen_path)
 
         # 转灰度
         if ref_gray_crop.ndim == 3: ref_gray_crop = cv2.cvtColor(ref_gray_crop, cv2.COLOR_BGR2GRAY)
@@ -106,6 +107,22 @@ class PatchColorComparatorBase:
 
         score = robust_cloth_color_diff(ref_color_crop, gen_color_crop,ref_mask_gray_crop,gen_mask_gray_crop, return_palette=True, palette_vis_path=os.path.join(output_dir, 'palette_vis.png'))
 
+        patch_mean_ssim, patch_ssim_list = compute_patch_ssim_from_matches(
+            ref_gray_crop,
+            gen_gray_crop,
+            kp1,
+            kp2,
+            filtered,
+            patch_size=self.patch_size,
+            stride=self.patch_size,  
+            save_dir=os.path.join(output_dir, "patch_pairs"), 
+            save_only_matched=True,
+        )
+
+        result.update({
+            "patch_ssim_mean": patch_mean_ssim,
+            "patch_ssim_list": patch_ssim_list,
+        })
 
 
         
@@ -118,27 +135,60 @@ class PatchColorComparatorBase:
             'score' : score
         })
 
-        print("\n====== 完整对比结果 ======")
-        print(f"总特征点数: {result['total_keypoints']}")
-        print(f"原始good matches: {result['good_matches']}")
-        print(f"过滤后matches: {result['filtered_matches']}")
-        print(f"匹配比例: {result['match_ratio']:.2%}")
-        print("分数详情：")
-        hist = result['score']['hist_wasserstein']
-        print(f"  Wasserstein(L,a,b,mean): "
-            f"{hist['L']:.2f}, {hist['a']:.2f}, {hist['b']:.2f}, mean={hist['mean']:.2f}")
-        print(f"  Palette ΔE2000: {result['score']['palette_deltaE']:.2f}")
-        print(f"  Mean Color ΔE2000: {result['score']['mean_color_deltaE']:.2f}")
-        spatten=match_ratio
-        spal=1-min(1,score['palette_deltaE']/20)
-        smean=1-min(1,score['mean_color_deltaE']/20)
-        b1=0.7  
-        b2=0.3
-        scol=b1 * spal + b2 * smean
-        sfinal=(spatten+scol)/2
-        print(f"Spattern: {spatten:.4f}")
-        print(f"Scolor: {scol:.4f}")
-        print(f"Sfinal = {sfinal:.4f}")
-        
+        # print("\n====== 完整对比结果 ======")
+        # print(f"总特征点数: {result['total_keypoints']}")
+        # print(f"原始good matches: {result['good_matches']}")
+        # print(f"过滤后matches: {result['filtered_matches']}")
+        # print(f"匹配比例: {result['match_ratio']:.2%}")
+        # print("分数详情：")
+        # hist = result['score']['hist_wasserstein']
+        # print(f"  Wasserstein(L,a,b,mean): "
+        #     f"{hist['L']:.2f}, {hist['a']:.2f}, {hist['b']:.2f}, mean={hist['mean']:.2f}")
+        # print(f"  Palette ΔE2000: {result['score']['palette_deltaE']:.2f}")
+        # print(f"  Mean Color ΔE2000: {result['score']['mean_color_deltaE']:.2f}")
+        # spatten=match_ratio
+        # spal=1-min(1,score['palette_deltaE']/20)
+        # smean=1-min(1,score['mean_color_deltaE']/20)
+        # b1=0.7  
+        # b2=0.3
+        # scol=b1 * spal + b2 * smean
+        # sfinal=(spatten+scol)/2
+        # print(f"Spattern: {spatten:.4f}")
+        # print(f"Scolor: {scol:.4f}")
+        # print(f"Sfinal = {sfinal:.4f}")
 
+        # —— 颜色/图案加权分数 —— 
+        spatten = float(match_ratio)                                        # 图案分
+        spal    = float(1 - min(1, float(score['palette_deltaE'])/20))      # 调色板 ΔE 归一化到 [0,1]
+        smean   = float(1 - min(1, float(score['mean_color_deltaE'])/20))   # 平均 ΔE 归一化到 [0,1]
+        b1, b2  = 0.7, 0.3
+        scol    = float(b1 * spal + b2 * smean)                             # 颜色分
+        sfinal  = float((spatten + scol) / 2)                               # 总分
+
+        # 打印
+        print(f"Spattern: {spatten:.4f}")
+        print(f"Scolor:   {scol:.4f}")
+        print(f"Sfinal =  {sfinal:.4f}")
+
+        # —— 写回到 result —— 
+        hist = result['score'].get('hist_wasserstein', {})
+        hist_py = {k: (float(v) if isinstance(v, (np.floating, float, int)) else (v.tolist() if hasattr(v, 'tolist') else v))
+                for k, v in hist.items()}
+
+        result['score']['hist_wasserstein'] = hist_py
+        result['score']['palette_deltaE']   = float(result['score']['palette_deltaE'])
+        result['score']['mean_color_deltaE']= float(result['score']['mean_color_deltaE'])
+
+        result['score_summary'] = {
+            'Spattern': spatten,
+            'Scolor':   scol,
+            'Sfinal':   sfinal,
+            'Scolor_components': {
+                'S_palette': spal,
+                'S_mean':    smean,
+                'b1':        b1,
+                'b2':        b2,
+            }
+        }
+        
         return result

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import sys
 import os
 import json
 import csv
@@ -10,10 +11,11 @@ import argparse
 import statistics
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
-
+sys.path.append(str(Path(__file__).resolve().parent.parent))
 import numpy as np
 import torch
 import lpips
+from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 from PIL import Image
 from skimage.metrics import structural_similarity, peak_signal_noise_ratio
 from tqdm import tqdm
@@ -21,12 +23,8 @@ from tqdm import tqdm
 from cleanfid import fid as CLEANFID
 from comparator.comparator import PatchColorComparatorBase
 
-# 可选：让 torch 模型缓存走特定目录
-# os.environ.setdefault('TORCH_HOME', '/home/fangjingwu/env/cache/torch')
 
 IMG_EXTS = {'.jpg', '.jpeg', '.png', '.bmp', '.webp'}
-
-# ---------- 基础工具 ----------
 
 def is_image_file(name: str) -> bool:
     return Path(name).suffix.lower() in IMG_EXTS
@@ -52,6 +50,26 @@ def rotate_image(img: np.ndarray, angle_deg: float) -> np.ndarray:
     c = (w / 2.0, h / 2.0)
     M = cv2.getRotationMatrix2D(c, angle_deg, 1.0)
     return cv2.warpAffine(img, M, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT101)
+
+def elastic_deform(img_bgr: np.ndarray, alpha: float=20.0, sigma: float=6.0, fill=(255,255,255)) -> np.ndarray:
+    """
+    Simard 弹性形变：随机位移 -> 高斯平滑 -> remap
+    alpha: 像素位移强度；sigma: 平滑尺度
+    """
+    h, w = img_bgr.shape[:2]
+    # 随机位移场（-1~1）
+    dx = (np.random.rand(h, w).astype(np.float32) * 2 - 1)
+    dy = (np.random.rand(h, w).astype(np.float32) * 2 - 1)
+    # 高斯平滑并按 alpha 缩放到像素位移
+    dx = cv2.GaussianBlur(dx, (0, 0), sigma) * alpha
+    dy = cv2.GaussianBlur(dy, (0, 0), sigma) * alpha
+    # 像素坐标映射
+    x, y = np.meshgrid(np.arange(w, dtype=np.float32), np.arange(h, dtype=np.float32))
+    map_x = x + dx
+    map_y = y + dy
+    # remap，越界用白色填充
+    return cv2.remap(img_bgr, map_x, map_y, interpolation=cv2.INTER_LINEAR,
+                     borderMode=cv2.BORDER_CONSTANT, borderValue=fill)
 
 def save_image(path: Path, img: np.ndarray) -> bool:
     ensure_dir(path.parent)
@@ -163,7 +181,8 @@ def compute_folder_ssim_lpips_psnr(
     """
     if device is None:
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    metric_lpips = lpips.LPIPS(net=lpips_net).to(device).eval()
+    # metric_lpips = lpips.LPIPS(net=lpips_net).to(device).eval()
+    metric_lpips = LearnedPerceptualImagePatchSimilarity(net_type='alex', normalize=True).to(device).eval()
 
     ssim_list, lpips_list, psnr_list = [], [], []
     per_rows = []
@@ -238,7 +257,7 @@ def parse_args():
     p.add_argument('--corner_config', type=str, default='adaptive')
 
     # 扰动
-    p.add_argument('--perturb', type=str, default='rotate', choices=['rotate'])
+    p.add_argument('--perturb', type=str, default='rotate', choices=['rotate','elastic'])
     p.add_argument('--angle', type=float, default=2.0)
 
     # 颜色分
@@ -283,10 +302,11 @@ def main():
         return
 
     spattern_list, scolor_list, sfinal_list = [], [], []
+    gen_f1score,disturb_f1score = [],[]
     ok_count, fail_count = 0, 0
 
     # 逐样本评测 + 扰动归一化
-    for ref_path, gen_path, name in tqdm(pairs, desc="逐样本评测（含扰动归一化）"):
+    for ref_path, gen_path, name in tqdm(pairs, desc="逐样本评测"):
         # 准备扰动参考图
         per_img_path = per_dir / name
         if args.overwrite or not per_img_path.is_file():
@@ -297,6 +317,9 @@ def main():
                 continue
             if args.perturb == 'rotate':
                 bgr_per = rotate_image(bgr, args.angle)
+            elif args.perturb == 'elastic':
+                bgr_per = elastic_deform(bgr, alpha=30.0, sigma=7.0, fill=(255,255,255))
+                bgr_per = cv2.GaussianBlur(bgr_per, (5, 5), sigmaX=2, sigmaY=2)
             else:
                 bgr_per = bgr
             if not save_image(per_img_path, bgr_per):
@@ -313,7 +336,6 @@ def main():
         if res_ref_gen is None:
             fail_count += 1
             continue
-
         # (ref, ref_perturbed)
         res_ref_per = run_compare(comparator, ref_path, per_img_path, out_pert, overwrite=args.overwrite)
         if res_ref_per is None:
@@ -325,6 +347,15 @@ def main():
         scolor = compute_scolor(res_ref_gen, Emax=args.Emax, b1=args.b1, b2=args.b2)
         sfinal = round((spattern + scolor) / 2.0, 4)
 
+        recall=(res_ref_gen["filtered_matches"]/res_ref_gen["total_keypoints"])
+        precision=(res_ref_gen["filtered_matches"]/res_ref_gen["gen_strategy_info"]["keypoint_count"])
+        F1score=2*recall*precision/(recall+precision)
+
+        recall2=(res_ref_per["filtered_matches"]/res_ref_per["total_keypoints"])
+        precision2=(res_ref_per["filtered_matches"]/res_ref_per["gen_strategy_info"]["keypoint_count"])
+        F1score2=2*recall2*precision2/(recall2+precision2)
+
+
         combined = {
             "filename": name,
             "perturb": {"type": args.perturb, "angle": float(args.angle), "path": str(per_img_path)},
@@ -332,7 +363,10 @@ def main():
                            "score": res_ref_gen.get("score", {})},
             "ref_vs_perturb": {"match_ratio": safe_float(res_ref_per.get("match_ratio", 0.0), 0.0),
                                "score": res_ref_per.get("score", {})},
+            "gen_F1score": F1score,
+            "distrub_F1score": F1score2,
             "Spattern": spattern, "Scolor": scolor, "Sfinal": sfinal
+
         }
         ensure_dir(cur_dir)
         with open(cur_dir / "combined.json", "w", encoding="utf-8") as f:
@@ -342,6 +376,8 @@ def main():
             spattern_list.append(spattern)
         scolor_list.append(scolor)
         sfinal_list.append(sfinal)
+        gen_f1score.append(F1score)
+        disturb_f1score.append(F1score2)
         ok_count += 1
 
     # 聚合逐样本统计
@@ -351,7 +387,8 @@ def main():
     spattern_mean, spattern_median = mean0(spattern_list), med0(spattern_list)
     scolor_mean, scolor_median     = mean0(scolor_list),  med0(scolor_list)
     sfinal_mean, sfinal_median     = mean0(sfinal_list),  med0(sfinal_list)
-
+    gen_f1score_mean, gen_f1score_median = mean0(gen_f1score), med0(gen_f1score)
+    disturb_f1score_mean, disturb_f1score_median = mean0(disturb_f1score), med0(disturb_f1score)
     # 通用指标
     folder_metrics = {}
     if args.compute_folder_metrics:
@@ -381,6 +418,8 @@ def main():
         "spattern_mean": spattern_mean, "spattern_median": spattern_median,
         "scolor_mean": scolor_mean,     "scolor_median": scolor_median,
         "sfinal_mean": sfinal_mean,     "sfinal_median": sfinal_median,
+        "gen_f1score_mean": gen_f1score_mean, "gen_f1score_median": gen_f1score_median,
+        "disturb_f1score_mean": disturb_f1score_mean, "disturb_f1score_median": disturb_f1score_median,
         "params": {
             "patch_size": args.patch_size, "region": args.region,
             "server_addr": args.server_addr, "corner_config": args.corner_config,
@@ -399,6 +438,8 @@ def main():
     print(f"Spattern_mean: {spattern_mean} | median: {spattern_median}")
     print(f"Scolor_mean:   {scolor_mean}   | median: {scolor_median}")
     print(f"Sfinal_mean:   {sfinal_mean}   | median: {sfinal_median}")
+    print(f"Gen F1score_mean: {gen_f1score_mean} | median: {gen_f1score_median}")
+    print(f"Disturb F1score_mean: {disturb_f1score_mean} | median: {disturb_f1score_median}")
     if args.compute_folder_metrics:
         print("通用指标")
         print(f"FID:  {folder_metrics.get('fid'):.4f} | KID(*1e3): {folder_metrics.get('kid'):.4f}")

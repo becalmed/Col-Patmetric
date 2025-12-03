@@ -1,0 +1,8 @@
+opencv-python
+numPy
+pillow
+tqdm
+grpcio
+protobuf
+lpips
+clean-fid
